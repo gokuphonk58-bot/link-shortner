@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Minimal URL Shortener (No API)</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 0; background: #0f1220; color: #e9ecf1; }
+    .wrap { max-width: 780px; margin: 0 auto; padding: 32px 20px; }
+    h1 { font-size: 1.6rem; margin: 0 0 8px; }
+    p { margin: 0 0 18px; color: #b8bfd5; }
+    .card { background: #151935; border: 1px solid #283055; border-radius: 12px; padding: 16px; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin-bottom: 12px; }
+    input[type="url"] { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #39416a; background: #0f1330; color: #e9ecf1; }
+    button { padding: 12px 16px; border-radius: 8px; border: 1px solid #6b7df7; background: #4050f0; color: white; cursor: pointer; }
+    button.secondary { background: transparent; border-color: #39416a; color: #cbd2ea; }
+    .out { margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .linkbox { padding: 10px 12px; border-radius: 8px; border: 1px solid #39416a; background: #0f1330; }
+    .list { margin-top: 18px; }
+    .item { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding: 10px; border-bottom: 1px dashed #283055; }
+    .item a { color: #8fb3ff; text-decoration: none; }
+    .badge { font-size: 0.85rem; color: #9aa8d6; }
+    .qr { width: 160px; height: 160px; background: white; border-radius: 8px; display: none; }
+    .footer { margin-top: 24px; font-size: 0.9rem; color: #8b92aa; }
+    .warn { color: #ffbf7b; }
+    @media (max-width: 640px) { .row { grid-template-columns: 1fr; } .item { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Link Shortener (Local, No API)</h1>
+    <p>Paste a URL, get a short code like <code>#/abc123</code>. Share the short link. When someone opens it, this page redirects them to the original URL.</p>
+
+    <div class="card">
+      <div class="row">
+        <input id="urlInput" type="url" placeholder="https://example.com/very/long/url?with=params" />
+        <button id="shortenBtn">Shorten</button>
+      </div>
+
+      <div class="out" id="output" style="display:none;">
+        <div class="linkbox" id="shortLinkBox"></div>
+        <button class="secondary" id="copyBtn">Copy</button>
+        <button class="secondary" id="qrBtn">QR</button>
+        <canvas id="qrCanvas" class="qr"></canvas>
+      </div>
+
+      <div class="list" id="list"></div>
+      <p class="footer"><span class="badge">Note:</span> Short links exist only in this browser’s localStorage. Host this file to share globally. If you host it, the short link format is <code>https://yourdomain/#/CODE</code>.</p>
+    </div>
+
+    <p class="footer warn">Security reminder: This is a demo. Anyone with access to your browser storage could see saved URLs.</p>
+  </div>
+
+  <script>
+    // Base62 alphabet
+    const ALPH = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    // Compute SHA-256 of input string and return Uint8Array
+    async function sha256(str) {
+      const data = new TextEncoder().encode(str);
+      const hash = await crypto.subtle.digest("SHA-256", data);
+      return new Uint8Array(hash);
+    }
+
+    // Convert bytes to a short base62 code (first 6 bytes -> ~8 chars)
+    function bytesToBase62Code(bytes, len = 6) {
+      let num = 0n;
+      for (let i = 0; i < len; i++) num = (num << 8n) | BigInt(bytes[i]);
+      let out = "";
+      while (num > 0) {
+        out = ALPH[Number(num % 62n)] + out;
+        num /= 62n;
+      }
+      return out.padStart(8, "0"); // ensure fixed length
+    }
+
+    // Storage helpers
+    const KEY = "urlShortener:map";
+    function loadMap() {
+      try {
+        return JSON.parse(localStorage.getItem(KEY) || "{}");
+      } catch { return {}; }
+    }
+    function saveMap(map) {
+      localStorage.setItem(KEY, JSON.stringify(map));
+    }
+
+    // Create or reuse a code for a URL
+    async function createCode(longUrl) {
+      const bytes = await sha256(longUrl.trim());
+      let code = bytesToBase62Code(bytes);
+      // Collision handling: append 2 chars from later bytes if taken
+      const map = loadMap();
+      if (map[code] && map[code] !== longUrl) {
+        code += ALPH[bytes[10] % 62] + ALPH[bytes[11] % 62];
+      }
+      map[code] = longUrl;
+      saveMap(map);
+      return code;
+    }
+
+    // Render list of saved mappings
+    function renderList() {
+      const map = loadMap();
+      const container = document.getElementById("list");
+      const base = location.origin + location.pathname + "#/";
+      const items = Object.entries(map).map(([code, url]) => {
+        return `
+          <div class="item">
+            <div><a href="${base}${code}" target="_blank">${base}${code}</a></div>
+            <div class="badge">${new URL(url).hostname}</div>
+            <div><a href="${url}" target="_blank">Original</a></div>
+          </div>
+        `;
+      }).join("");
+      container.innerHTML = items || '<div class="badge">No links yet. Create one above.</div>';
+    }
+
+    // Redirect handler: if path is #/CODE, redirect
+    function checkRedirect() {
+      const hash = location.hash;
+      if (hash.startsWith("#/")) {
+        const code = hash.slice(2);
+        const map = loadMap();
+        const url = map[code];
+        if (url) {
+          // Use replace to avoid back button loops
+          location.replace(url);
+        } else {
+          // Not found notice
+          const wrap = document.querySelector(".wrap");
+          const msg = document.createElement("p");
+          msg.className = "warn";
+          msg.textContent = "Short code not found in this browser. If you hosted this, ensure the code exists on the server-side or recreate here.";
+          wrap.appendChild(msg);
+        }
+      }
+    }
+
+    // Copy helper
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        alert("Copied!");
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = text; document.body.appendChild(ta);
+        ta.select(); document.execCommand("copy");
+        document.body.removeChild(ta);
+        alert("Copied!");
+      }
+    }
+
+    // Minimal QR generator (error correction omitted)
+    // Simple library-free approach using a placeholder pattern: encode data as blocks
+    function drawQR(canvas, text) {
+      const ctx = canvas.getContext("2d");
+      const size = 160;
+      canvas.width = size; canvas.height = size;
+      ctx.fillStyle = "#fff"; ctx.fillRect(0,0,size,size);
+      // Draw finder-like squares
+      const sq = (x,y,s)=>{ ctx.fillStyle="#000"; ctx.fillRect(x,y,s,s); ctx.fillStyle="#fff"; ctx.fillRect(x+4,y+4,s-8,s-8); ctx.fillStyle="#000"; ctx.fillRect(x+8,y+8,s-16,s-16); };
+      sq(8,8,44); sq(size-52,8,44); sq(8,size-52,44);
+      // Very simple data stripe
+      ctx.fillStyle="#000";
+      let x = 8, y = size/2 - 10;
+      for (let i=0;i<text.length;i++){
+        const v = text.charCodeAt(i);
+        for (let b=0;b<8;b++){
+          if (v & (1<<b)) ctx.fillRect(x, y, 2, 2);
+          x += 3; if (x > size-8) { x = 8; y += 3; }
+        }
+      }
+    }
+
+    // UI wiring
+    document.getElementById("shortenBtn").addEventListener("click", async () => {
+      const input = document.getElementById("urlInput");
+      const raw = input.value.trim();
+      if (!raw) { alert("Enter a URL."); return; }
+      let url;
+      try { url = new URL(raw); }
+      catch { alert("Invalid URL format."); return; }
+
+      const code = await createCode(url.href);
+      const short = location.origin + location.pathname + "#/" + code;
+
+      const out = document.getElementById("output");
+      const box = document.getElementById("shortLinkBox");
+      box.textContent = short;
+      out.style.display = "flex";
+
+      renderList();
+    });
+
+    document.getElementById("copyBtn").addEventListener("click", () => {
+      const text = document.getElementById("shortLinkBox").textContent;
+      if (text) copyText(text);
+    });
+
+    document.getElementById("qrBtn").addEventListener("click", () => {
+      const text = document.getElementById("shortLinkBox").textContent;
+      const canvas = document.getElementById("qrCanvas");
+      if (!text) return;
+      drawQR(canvas, text);
+      canvas.style.display = "block";
+    });
+
+    // Init
+    renderList();
+    checkRedirect();
+    window.addEventListener("hashchange", checkRedirect);
+  </script>
+</body>
+</html>
